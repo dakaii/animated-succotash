@@ -3,7 +3,9 @@ set -euo pipefail
 
 PROJECT_ID="__PROJECT_ID__"
 MODEL="__MODEL__"
-ENABLE_CLOUDFLARE_TUNNEL="__ENABLE_CLOUDFLARE_TUNNEL__"
+INGRESS_MODE="__INGRESS_MODE__"
+PUBLIC_HOSTNAME="__PUBLIC_HOSTNAME__"
+ACME_EMAIL="__ACME_EMAIL__"
 TELEGRAM_WEBHOOK="__TELEGRAM_WEBHOOK__"
 
 HERMES_HOME="/opt/hermes-data"
@@ -80,7 +82,7 @@ install_docker() {
 }
 
 install_cloudflared() {
-  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" != "true" ]]; then
+  if [[ "${INGRESS_MODE}" != cloudflare-* ]]; then
     return
   fi
 
@@ -95,6 +97,11 @@ install_cloudflared() {
 }
 
 write_compose() {
+  if [[ "${INGRESS_MODE}" == "traefik" ]]; then
+    write_compose_traefik
+    return
+  fi
+
   local extra_ports=""
   if [[ "${TELEGRAM_WEBHOOK}" == "true" ]]; then
     extra_ports=$'      - "8443:8443"\n'
@@ -125,6 +132,87 @@ ${extra_ports}    volumes:
 EOF
 }
 
+write_compose_traefik() {
+  mkdir -p "${HERMES_HOME}/letsencrypt"
+  touch "${HERMES_HOME}/letsencrypt/acme.json"
+  chmod 600 "${HERMES_HOME}/letsencrypt/acme.json"
+
+  local webhook_labels=""
+  if [[ "${TELEGRAM_WEBHOOK}" == "true" ]]; then
+    webhook_labels=$(cat <<EOF
+      - "traefik.enable=true"
+      - "traefik.http.routers.hermes-webhook.rule=Host(\`${PUBLIC_HOSTNAME}\`) && PathPrefix(\`/telegram\`)"
+      - "traefik.http.routers.hermes-webhook.entrypoints=websecure"
+      - "traefik.http.routers.hermes-webhook.tls.certresolver=le"
+      - "traefik.http.routers.hermes-webhook.priority=100"
+      - "traefik.http.services.hermes-webhook.loadbalancer.server.port=8443"
+EOF
+)
+  fi
+
+  cat > "${COMPOSE_DIR}/docker-compose.yml" <<EOF
+networks:
+  edge:
+    name: hermes-edge
+
+services:
+  traefik:
+    image: traefik:v3.3
+    container_name: traefik
+    restart: unless-stopped
+    networks: [edge]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /opt/hermes-data/letsencrypt:/letsencrypt
+    command:
+      - --providers.docker=true
+      - --providers.docker.network=hermes-edge
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --certificatesresolvers.le.acme.email=${ACME_EMAIL}
+      - --certificatesresolvers.le.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.le.acme.httpchallenge=true
+      - --certificatesresolvers.le.acme.httpchallenge.entrypoint=web
+
+  hermes:
+    image: nousresearch/hermes-agent:latest
+    container_name: hermes
+    restart: unless-stopped
+    networks: [edge]
+    command: gateway run
+    expose:
+      - "8642"
+      - "9119"
+      - "8443"
+    volumes:
+      - /opt/hermes-data:/root/.hermes
+    environment:
+      HERMES_DASHBOARD: "1"
+      API_SERVER_ENABLED: "true"
+      API_SERVER_HOST: "0.0.0.0"
+      HERMES_ALLOW_ROOT_GATEWAY: "1"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.hermes-dashboard.rule=Host(\`${PUBLIC_HOSTNAME}\`)"
+      - "traefik.http.routers.hermes-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.hermes-dashboard.tls.certresolver=le"
+      - "traefik.http.routers.hermes-dashboard.priority=1"
+      - "traefik.http.services.hermes-dashboard.loadbalancer.server.port=9119"
+${webhook_labels}
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "2.0"
+EOF
+}
+
 write_config() {
   local openrouter_key telegram_token telegram_users github_pat webhook_url webhook_secret
   local mcp_block=""
@@ -145,13 +233,19 @@ TELEGRAM_BOT_TOKEN=${telegram_token}
 TELEGRAM_ALLOWED_USERS=${telegram_users}
 EOF
 
-  if [[ "${TELEGRAM_WEBHOOK}" == "true" && -f "${LOG_DIR}/tunnel-url.txt" ]]; then
-    webhook_url="$(cat "${LOG_DIR}/tunnel-url.txt")/telegram"
-    webhook_secret="$(openssl rand -hex 32)"
-    cat >> "${HERMES_HOME}/.env" <<EOF
+  if [[ "${TELEGRAM_WEBHOOK}" == "true" ]]; then
+    if [[ -n "${PUBLIC_HOSTNAME}" && "${INGRESS_MODE}" != "cloudflare-quick" ]]; then
+      webhook_url="https://${PUBLIC_HOSTNAME}/telegram"
+    elif [[ -f "${LOG_DIR}/tunnel-url.txt" ]]; then
+      webhook_url="$(cat "${LOG_DIR}/tunnel-url.txt")/telegram"
+    fi
+    if [[ -n "${webhook_url:-}" ]]; then
+      webhook_secret="$(openssl rand -hex 32)"
+      cat >> "${HERMES_HOME}/.env" <<EOF
 TELEGRAM_WEBHOOK_URL=${webhook_url}
 TELEGRAM_WEBHOOK_SECRET=${webhook_secret}
 EOF
+    fi
   fi
 
   if [[ -n "${github_pat}" ]]; then
@@ -196,11 +290,46 @@ EOF
   chown -R root:root "${HERMES_HOME}"
 }
 
-start_cloudflared() {
-  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" != "true" ]]; then
-    return
+start_named_cloudflared() {
+  local token
+  token="$(fetch_secret cloudflare-tunnel-token || true)"
+  if [[ -z "${token}" ]]; then
+    log "ERROR: cloudflare-tunnel-token missing from Secret Manager"
+    exit 1
   fi
 
+  log "Starting named Cloudflare tunnel for ${PUBLIC_HOSTNAME}"
+  echo "https://${PUBLIC_HOSTNAME}" > "${LOG_DIR}/tunnel-url.txt"
+
+  install -d -m 700 /etc/hermes
+  echo "${token}" > /etc/hermes/cloudflared-token
+  chmod 600 /etc/hermes/cloudflared-token
+
+  cat > /etc/systemd/system/cloudflared-hermes.service <<'UNIT'
+[Unit]
+Description=Cloudflare named tunnel for Hermes
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/bin/bash -c '/usr/local/bin/cloudflared tunnel run --token "$(cat /etc/hermes/cloudflared-token)"'
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/hermes/cloudflared.log
+StandardError=append:/var/log/hermes/cloudflared.log
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+  systemctl daemon-reload
+  systemctl enable cloudflared-hermes
+  systemctl restart cloudflared-hermes
+  log "Named tunnel URL: https://${PUBLIC_HOSTNAME}"
+}
+
+start_quick_cloudflared() {
   local tunnel_port="9119"
   if [[ "${TELEGRAM_WEBHOOK}" == "true" ]]; then
     tunnel_port="8443"
@@ -243,6 +372,14 @@ UNIT
   log "WARNING: Could not capture Cloudflare tunnel URL yet"
 }
 
+start_cloudflared() {
+  case "${INGRESS_MODE}" in
+    cloudflare-named) start_named_cloudflared ;;
+    cloudflare-quick) start_quick_cloudflared ;;
+    *) return ;;
+  esac
+}
+
 ensure_hermes_node() {
   if docker exec hermes command -v npx >/dev/null 2>&1; then
     return
@@ -275,7 +412,7 @@ start_hermes() {
 ensure_services() {
   cd "${COMPOSE_DIR}"
   docker compose up -d
-  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" ]]; then
+  if [[ "${INGRESS_MODE}" == cloudflare-* ]]; then
     systemctl restart cloudflared-hermes 2>/dev/null || true
   fi
 }
@@ -287,20 +424,28 @@ run_bootstrap() {
   install_cloudflared
   write_compose
 
-  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" && "${TELEGRAM_WEBHOOK}" == "true" ]]; then
+  if [[ "${INGRESS_MODE}" == cloudflare-* && "${TELEGRAM_WEBHOOK}" == "true" ]]; then
     start_cloudflared
   fi
 
   write_config
   start_hermes
 
-  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" && "${TELEGRAM_WEBHOOK}" != "true" ]]; then
+  if [[ "${INGRESS_MODE}" == "traefik" && -n "${PUBLIC_HOSTNAME}" ]]; then
+    echo "https://${PUBLIC_HOSTNAME}" > "${LOG_DIR}/tunnel-url.txt"
+  fi
+
+  if [[ "${INGRESS_MODE}" == cloudflare-* && "${TELEGRAM_WEBHOOK}" != "true" ]]; then
     start_cloudflared
   fi
 
   date -Iseconds > "${BOOTSTRAP_MARKER}"
-  log "Setup complete"
-  log "Telegram uses outbound polling by default — no public URL required for messaging"
+  log "Setup complete (ingress: ${INGRESS_MODE})"
+  if [[ "${TELEGRAM_WEBHOOK}" == "true" ]]; then
+    log "Telegram webhook mode enabled"
+  else
+    log "Telegram polling mode — VM connects outbound to Telegram"
+  fi
   if [[ -f "${LOG_DIR}/tunnel-url.txt" ]]; then
     log "Dashboard URL: $(cat "${LOG_DIR}/tunnel-url.txt")"
   fi

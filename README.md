@@ -5,31 +5,59 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) to a private
 - **Pulumi** — VPC, NAT, Secret Manager, persistent disk, VM
 - **Telegram** — message your agent (polling mode, no public URL needed)
 - **GitHub MCP** — issues, PRs, code search, file edits
-- **Cloudflare quick tunnel** — free `*.trycloudflare.com` URL for the dashboard (optional)
+- **Cloudflare named tunnel (default)** — stable `https://bot.yourdomain.com`, no open ports
+- **Traefik ingress** — alternative with static IP + Let's Encrypt
+
+## Ingress options
+
+| Mode | Public IP | Domain | TLS | Firewall | Cost |
+|---|---|---|---|---|---|
+| **`cloudflare-named`** (default) | No | CNAME on Cloudflare | Cloudflare | No open ports | $0/mo from Cloudflare |
+| **`none`** | No | No | — | SSH via IAP only | $0 extra |
+| **`traefik`** | Static GCP IP | A record → IP | Traefik + Let's Encrypt | 80, 443 open | ~$0/mo (IP free while VM runs) |
+| **`cloudflare-quick`** | No | Random `*.trycloudflare.com` | Cloudflare | No open ports | $0 |
+
+**Recommended:** `cloudflare-named` — VM stays private, DDoS protection included, same ~$10/year domain cost.
+
+### Traefik + static IP (alternative)
+
+Traefik automates TLS and routing if you prefer a traditional VPS setup or can't use Cloudflare. Tradeoff: ports 80/443 are open on a public IP.
 
 ## Architecture
 
 ```
 Telegram App
-    │  (outbound polling — VM initiates connection)
+    │  webhook (HTTPS push) or polling (outbound)
     ▼
 Hermes Gateway (Docker on private GCP VM)
     ├── OpenRouter → DeepSeek
     ├── GitHub MCP → your repos
-    └── Cloudflare quick tunnel → dashboard (optional)
+    └── Cloudflare named tunnel → bot.yourdomain.com
 ```
 
-The VM has **no public IP**. Outbound traffic goes through Cloud NAT. Telegram works via long polling, so you never need to SSH for daily use.
+The VM has **no public IP**. Outbound traffic goes through Cloud NAT.
+
+## Domain setup (one-time, ~$10/year)
+
+Yes — you buy a domain **separately**, then point its DNS to Cloudflare (free):
+
+1. Register a domain at [Cloudflare Registrar](https://www.cloudflare.com/products/registrar/), Namecheap, Google Domains, etc. (~$8–15/year)
+2. Add the domain to your Cloudflare account (free plan is fine)
+3. Use a subdomain like `bot.yourdomain.com` in `./scripts/setup.sh`
+
+Cloudflare Tunnel itself is **$0/month**. You only pay for the domain registration.
 
 ## Prerequisites
 
 - [Pulumi CLI](https://www.pulumi.com/docs/install/)
 - [gcloud CLI](https://cloud.google.com/sdk/docs/install) (authenticated)
 - [Docker](https://docs.docker.com/get-docker/) (for local dev only)
+- **Domain on Cloudflare** (for named tunnel — default)
+- **Cloudflare API token** with Tunnel Edit + DNS Edit permissions (`export CLOUDFLARE_API_TOKEN=...`)
 - OpenRouter API key ([openrouter.ai](https://openrouter.ai))
 - Telegram bot token ([@BotFather](https://t.me/BotFather))
 - Telegram user ID ([@userinfobot](https://t.me/userinfobot))
-- GitHub fine-grained PAT (Contents + Pull requests read/write)
+- GitHub fine-grained PAT (Contents + Pull requests read/write, optional)
 
 ## Quick start
 
@@ -45,8 +73,8 @@ This stores secrets in Pulumi config and provisions them in GCP Secret Manager o
 ### 2. Deploy to GCP
 
 ```bash
-cd infra
-pulumi up
+export CLOUDFLARE_API_TOKEN=your-token   # required for named tunnel
+./scripts/deploy.sh
 ```
 
 First boot takes ~3–5 minutes (Docker pull + Hermes start).
@@ -55,13 +83,12 @@ First boot takes ~3–5 minutes (Docker pull + Hermes start).
 
 Open Telegram, find your bot, send a message. Hermes replies via the gateway running on the VM.
 
-### 4. (Optional) Open the dashboard
+### 4. Your stable URL
 
 ```bash
 ./scripts/get-tunnel-url.sh
+# e.g. https://bot.yourdomain.com
 ```
-
-Returns a `https://….trycloudflare.com` URL for the Hermes dashboard. The URL stays stable as long as the tunnel process keeps running (systemd auto-restarts it).
 
 ## Local development
 
@@ -108,8 +135,9 @@ animated-succotash/
 | `gcp:zone` | `us-central1-a` | VM zone |
 | `hermes:instance_type` | `e2-medium` | VM size (use `e2-micro` for free tier) |
 | `hermes:model` | `deepseek/deepseek-chat` | OpenRouter model |
-| `hermes:enable_cloudflare_tunnel` | `true` | Expose dashboard via quick tunnel |
-| `hermes:telegram_webhook` | `false` | Use webhook instead of polling |
+| `hermes:ingress_mode` | `cloudflare-named` | `cloudflare-named`, `traefik`, `cloudflare-quick`, `none` |
+| `hermes:hostname` | — | e.g. `bot.yourdomain.com` |
+| `hermes:acme_email` | — | Let's Encrypt contact (traefik mode) |
 
 Secrets (set with `pulumi config set --secret`):
 
@@ -136,7 +164,8 @@ The VM config enables these MCP tools: list/create/update issues, search code, r
 |---|---|
 | e2-medium VM | ~$15–20 |
 | 20GB SSD disk | ~$2 |
-| Cloudflare quick tunnel | $0 |
+| Cloudflare named tunnel | $0 |
+| Domain (annual) | ~$8–15/year |
 | OpenRouter (DeepSeek Flash) | ~$2–5 |
 | **Total** | **~$17–27** |
 
@@ -166,15 +195,22 @@ gcloud compute ssh hermes-vm --zone=us-central1-a --tunnel-through-iap \
 ./scripts/rebootstrap.sh
 ```
 
-## Telegram: polling vs webhook
+## Telegram: polling vs webhook (not WebSocket)
 
-Default is **polling** (recommended for always-on GCP VMs). The VM connects outbound to Telegram — no tunnel or domain required.
+Telegram bots do **not** use WebSockets. The Bot API only supports two update modes:
 
-Enable webhook mode only if you need sleep-when-idle (e.g. serverless):
+| Mode | How it works | Needs public URL? | Best for |
+|---|---|---|---|
+| **Polling** (long polling) | Your VM repeatedly asks Telegram "any new messages?" | No | Simplest; works without a domain |
+| **Webhook** | Telegram pushes messages to your HTTPS URL | Yes | Slightly lower latency; stable URL via named tunnel |
+
+There is no WebSocket option for Telegram bots. Hermes uses one of the above under the hood.
+
+**Default with named tunnel:** webhook mode at `https://bot.yourdomain.com/telegram` — Telegram pushes updates to you instead of your VM polling outbound.
+
+**Prefer polling?** Set `hermes:telegram_webhook false` — works fine on an always-on VM and doesn't need the tunnel for messaging at all.
 
 ```bash
-pulumi config set hermes:telegram_webhook true
+pulumi config set hermes:telegram_webhook false
 pulumi up
 ```
-
-This requires the Cloudflare tunnel URL to be ready before Hermes starts.
