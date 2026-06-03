@@ -103,13 +103,19 @@ cp hermes/config.yaml.example hermes/config.yaml
 
 ```
 animated-succotash/
-├── infra/                  # Pulumi GCP infrastructure
+├── infra/                  # Pulumi GCP + Cloudflare infrastructure
 │   ├── __main__.py
-│   ├── Pulumi.yaml
+│   ├── vm_bundle.py        # Packages vm/ files into startup metadata
 │   └── requirements.txt
 ├── vm/
-│   └── startup.sh          # VM bootstrap (Docker, Hermes, cloudflared)
-├── hermes/
+│   ├── startup.sh          # Thin entrypoint (env vars → bootstrap)
+│   ├── bootstrap.sh        # Orchestrates first-boot setup
+│   ├── docker-compose.yml  # Hermes container definition
+│   ├── hermes.config.yaml.tpl
+│   ├── hermes.github-mcp.yaml.tpl
+│   ├── systemd/            # cloudflared unit files
+│   └── lib/                # Modular bootstrap functions
+├── hermes/                 # Local dev only
 │   ├── docker-compose.yml  # Local dev compose file
 │   ├── config.yaml.example
 │   └── .env.example

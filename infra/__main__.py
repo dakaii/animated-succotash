@@ -2,7 +2,6 @@
 
 import base64
 import secrets
-from pathlib import Path
 
 import pulumi
 import pulumi_cloudflare as cloudflare
@@ -198,14 +197,14 @@ data_disk = gcp.compute.Disk(
     zone=zone,
 )
 
-startup_script_path = Path(__file__).parent.parent / "vm" / "startup.sh"
-startup_script = startup_script_path.read_text()
-startup_script = startup_script.replace("__PROJECT_ID__", project_id)
-startup_script = startup_script.replace("__MODEL__", model)
-startup_script = startup_script.replace("__INGRESS_MODE__", ingress_mode)
-startup_script = startup_script.replace("__PUBLIC_HOSTNAME__", public_hostname)
-startup_script = startup_script.replace(
-    "__TELEGRAM_WEBHOOK__", "true" if telegram_webhook else "false"
+from vm_bundle import build_startup_script
+
+startup_script = build_startup_script(
+    project_id=project_id,
+    model=model,
+    ingress_mode=ingress_mode,
+    public_hostname=public_hostname,
+    telegram_webhook=telegram_webhook,
 )
 
 instance = gcp.compute.Instance(
