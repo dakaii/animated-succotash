@@ -1,0 +1,13 @@
+config:
+  gcp:project: YOUR_GCP_PROJECT_ID
+  gcp:zone: us-central1-a
+  hermes:instance_type: e2-medium
+  hermes:disk_size_gb: 20
+  hermes:model: deepseek/deepseek-chat
+  hermes:enable_cloudflare_tunnel: true
+  hermes:telegram_webhook: false
+  # Set secrets with: pulumi config set --secret <key> "<value>"
+  # openrouter_api_key: sk-or-...
+  # telegram_bot_token: 123456:ABC-...
+  # telegram_allowed_users: 123456789
+  # github_pat: github_pat_...

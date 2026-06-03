@@ -1,0 +1,37 @@
+name: hermes-gcp
+runtime: python
+description: Hermes Agent on GCP with Telegram, GitHub MCP, and Cloudflare quick tunnel
+
+config:
+  gcp:project:
+    type: string
+  gcp:zone:
+    type: string
+    default: us-central1-a
+  hermes:instance_type:
+    type: string
+    default: e2-medium
+  hermes:disk_size_gb:
+    type: integer
+    default: 20
+  hermes:model:
+    type: string
+    default: deepseek/deepseek-chat
+  hermes:enable_cloudflare_tunnel:
+    type: boolean
+    default: true
+  hermes:telegram_webhook:
+    type: boolean
+    default: false
+  openrouter_api_key:
+    type: string
+    secret: true
+  telegram_bot_token:
+    type: string
+    secret: true
+  telegram_allowed_users:
+    type: string
+    secret: true
+  github_pat:
+    type: string
+    secret: true
