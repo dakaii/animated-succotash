@@ -35,3 +35,4 @@ config:
   github_pat:
     type: string
     secret: true
+    default: ""

@@ -93,8 +93,11 @@ animated-succotash/
 │   └── .env.example
 └── scripts/
     ├── setup.sh            # Interactive Pulumi config
+    ├── deploy.sh           # pulumi up wrapper
     ├── local-dev.sh        # Run Hermes locally
-    └── get-tunnel-url.sh   # Fetch dashboard URL from VM
+    ├── health.sh           # Check VM + gateway status
+    ├── get-tunnel-url.sh   # Fetch dashboard URL from VM
+    └── rebootstrap.sh      # Re-run bootstrap after secret changes
 ```
 
 ## Configuration
@@ -160,7 +163,7 @@ gcloud compute ssh hermes-vm --zone=us-central1-a --tunnel-through-iap \
 **Re-run bootstrap after secret rotation**
 
 ```bash
-gcloud compute instances reset hermes-vm --zone=us-central1-a
+./scripts/rebootstrap.sh
 ```
 
 ## Telegram: polling vs webhook

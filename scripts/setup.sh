@@ -36,14 +36,17 @@ read -rsp "OpenRouter API key: " OPENROUTER_KEY
 echo
 read -rsp "Telegram bot token (from @BotFather): " TELEGRAM_TOKEN
 echo
-read -rp "Telegram user ID (from @userinfobot): " TELEGRAM_USER
-read -rsp "GitHub PAT (repo + PR scopes): " GITHUB_PAT
+read -rsp "Telegram user ID (from @userinfobot): " TELEGRAM_USER
+echo
+read -rsp "GitHub PAT (repo + PR scopes, optional — press Enter to skip): " GITHUB_PAT
 echo
 
 pulumi config set --secret openrouter_api_key "${OPENROUTER_KEY}"
 pulumi config set --secret telegram_bot_token "${TELEGRAM_TOKEN}"
 pulumi config set --secret telegram_allowed_users "${TELEGRAM_USER}"
-pulumi config set --secret github_pat "${GITHUB_PAT}"
+if [[ -n "${GITHUB_PAT}" ]]; then
+  pulumi config set --secret github_pat "${GITHUB_PAT}"
+fi
 
 echo
 echo "=== Optional settings ==="
@@ -61,7 +64,11 @@ pip install -q -r requirements.txt
 
 echo
 echo "Enabling GCP APIs..."
-gcloud services enable compute.googleapis.com secretmanager.googleapis.com iam.googleapis.com \
+gcloud services enable \
+  compute.googleapis.com \
+  secretmanager.googleapis.com \
+  iam.googleapis.com \
+  iap.googleapis.com \
   --project="${PROJECT_ID}"
 
 echo

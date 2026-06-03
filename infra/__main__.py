@@ -24,12 +24,27 @@ telegram_webhook = hermes_config.get_bool("telegram_webhook")
 if telegram_webhook is None:
     telegram_webhook = False
 
+for api in (
+    "compute.googleapis.com",
+    "secretmanager.googleapis.com",
+    "iam.googleapis.com",
+    "iap.googleapis.com",
+):
+    gcp.projects.Service(
+        f"enable-{api.replace('.', '-')}",
+        service=api,
+        disable_on_destroy=False,
+    )
+
 secret_names = {
     "openrouter-api-key": config.require_secret("openrouter_api_key"),
     "telegram-bot-token": config.require_secret("telegram_bot_token"),
     "telegram-allowed-users": config.require_secret("telegram_allowed_users"),
-    "github-pat": config.require_secret("github_pat"),
 }
+
+github_pat = config.get_secret("github_pat")
+if github_pat:
+    secret_names["github-pat"] = github_pat
 
 secrets = {}
 for secret_id, secret_value in secret_names.items():

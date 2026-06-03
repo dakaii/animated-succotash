@@ -9,18 +9,44 @@ TELEGRAM_WEBHOOK="__TELEGRAM_WEBHOOK__"
 HERMES_HOME="/opt/hermes-data"
 LOG_DIR="/var/log/hermes"
 COMPOSE_DIR="/opt/hermes"
+BOOTSTRAP_MARKER="/var/lib/hermes/bootstrapped"
 
 log() {
   echo "[hermes-setup] $*" | tee -a "${LOG_DIR}/startup.log"
 }
 
-mkdir -p "${LOG_DIR}" "${HERMES_HOME}" "${COMPOSE_DIR}"
+mkdir -p "${LOG_DIR}" "${HERMES_HOME}" "${COMPOSE_DIR}" /var/lib/hermes
+
+install_packages() {
+  if command -v jq >/dev/null 2>&1; then
+    return
+  fi
+  log "Installing jq"
+  apt-get update -qq
+  apt-get install -y -qq jq curl
+}
+
+metadata_token() {
+  curl -sf -H "Metadata-Flavor: Google" \
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token" \
+    | jq -r .access_token
+}
 
 fetch_secret() {
   local secret_id="$1"
-  gcloud secrets versions access latest \
-    --secret="${secret_id}" \
-    --project="${PROJECT_ID}" 2>/dev/null || true
+  local token payload
+
+  token="$(metadata_token)"
+  payload="$(curl -sf \
+    -H "Authorization: Bearer ${token}" \
+    "https://secretmanager.googleapis.com/v1/projects/${PROJECT_ID}/secrets/${secret_id}/versions/latest:access" \
+    | jq -r .payload.data)" || return 1
+
+  if [[ -z "${payload}" || "${payload}" == "null" ]]; then
+    return 1
+  fi
+
+  echo "${payload}" | base64 -d
 }
 
 format_data_disk() {
@@ -69,7 +95,12 @@ install_cloudflared() {
 }
 
 write_compose() {
-  cat > "${COMPOSE_DIR}/docker-compose.yml" <<'EOF'
+  local extra_ports=""
+  if [[ "${TELEGRAM_WEBHOOK}" == "true" ]]; then
+    extra_ports=$'      - "8443:8443"\n'
+  fi
+
+  cat > "${COMPOSE_DIR}/docker-compose.yml" <<EOF
 services:
   hermes:
     image: nousresearch/hermes-agent:latest
@@ -79,7 +110,7 @@ services:
     ports:
       - "8642:8642"
       - "9119:9119"
-    volumes:
+${extra_ports}    volumes:
       - /opt/hermes-data:/root/.hermes
     environment:
       HERMES_DASHBOARD: "1"
@@ -96,11 +127,12 @@ EOF
 
 write_config() {
   local openrouter_key telegram_token telegram_users github_pat webhook_url webhook_secret
+  local mcp_block=""
 
-  openrouter_key="$(fetch_secret openrouter-api-key)"
-  telegram_token="$(fetch_secret telegram-bot-token)"
-  telegram_users="$(fetch_secret telegram-allowed-users)"
-  github_pat="$(fetch_secret github-pat)"
+  openrouter_key="$(fetch_secret openrouter-api-key || true)"
+  telegram_token="$(fetch_secret telegram-bot-token || true)"
+  telegram_users="$(fetch_secret telegram-allowed-users || true)"
+  github_pat="$(fetch_secret github-pat || true)"
 
   if [[ -z "${openrouter_key}" || -z "${telegram_token}" || -z "${telegram_users}" ]]; then
     log "ERROR: Required secrets missing in Secret Manager"
@@ -122,14 +154,8 @@ TELEGRAM_WEBHOOK_SECRET=${webhook_secret}
 EOF
   fi
 
-  cat > "${HERMES_HOME}/config.yaml" <<EOF
-model:
-  default: "${MODEL}"
-  provider: openrouter
-  base_url: https://openrouter.ai/api/v1
-
-platform_toolsets:
-  telegram: [hermes-telegram]
+  if [[ -n "${github_pat}" ]]; then
+    mcp_block=$(cat <<EOF
 
 mcp_servers:
   github:
@@ -151,6 +177,19 @@ mcp_servers:
         - create_pull_request_review
       prompts: false
       resources: false
+EOF
+)
+  fi
+
+  cat > "${HERMES_HOME}/config.yaml" <<EOF
+model:
+  default: "${MODEL}"
+  provider: openrouter
+  base_url: https://openrouter.ai/api/v1
+
+platform_toolsets:
+  telegram: [hermes-telegram]
+${mcp_block}
 EOF
 
   chmod 600 "${HERMES_HOME}/.env" "${HERMES_HOME}/config.yaml"
@@ -204,6 +243,17 @@ UNIT
   log "WARNING: Could not capture Cloudflare tunnel URL yet"
 }
 
+ensure_hermes_node() {
+  if docker exec hermes command -v npx >/dev/null 2>&1; then
+    return
+  fi
+
+  log "Installing Node.js in Hermes container for GitHub MCP"
+  docker exec hermes bash -c \
+    'apt-get update -qq && apt-get install -y -qq nodejs npm' \
+    || log "WARNING: Could not install Node.js in container; GitHub MCP may not work"
+}
+
 start_hermes() {
   log "Starting Hermes Agent"
   cd "${COMPOSE_DIR}"
@@ -212,6 +262,7 @@ start_hermes() {
 
   for _ in $(seq 1 30); do
     if docker exec hermes hermes doctor >/dev/null 2>&1; then
+      ensure_hermes_node
       log "Hermes is healthy"
       return
     fi
@@ -221,25 +272,46 @@ start_hermes() {
   log "WARNING: Hermes doctor did not pass within timeout"
 }
 
-format_data_disk
-install_docker
-install_cloudflared
-write_compose
+ensure_services() {
+  cd "${COMPOSE_DIR}"
+  docker compose up -d
+  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" ]]; then
+    systemctl restart cloudflared-hermes 2>/dev/null || true
+  fi
+}
 
-if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" && "${TELEGRAM_WEBHOOK}" == "true" ]]; then
-  start_cloudflared
+run_bootstrap() {
+  format_data_disk
+  install_packages
+  install_docker
+  install_cloudflared
+  write_compose
+
+  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" && "${TELEGRAM_WEBHOOK}" == "true" ]]; then
+    start_cloudflared
+  fi
+
+  write_config
+  start_hermes
+
+  if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" && "${TELEGRAM_WEBHOOK}" != "true" ]]; then
+    start_cloudflared
+  fi
+
+  date -Iseconds > "${BOOTSTRAP_MARKER}"
+  log "Setup complete"
+  log "Telegram uses outbound polling by default — no public URL required for messaging"
+  if [[ -f "${LOG_DIR}/tunnel-url.txt" ]]; then
+    log "Dashboard URL: $(cat "${LOG_DIR}/tunnel-url.txt")"
+  fi
+}
+
+if [[ -f "${BOOTSTRAP_MARKER}" ]]; then
+  log "Already bootstrapped at $(cat "${BOOTSTRAP_MARKER}"); ensuring services are running"
+  install_packages
+  install_docker
+  ensure_services
+  exit 0
 fi
 
-write_config
-
-start_hermes
-
-if [[ "${ENABLE_CLOUDFLARE_TUNNEL}" == "true" && "${TELEGRAM_WEBHOOK}" != "true" ]]; then
-  start_cloudflared
-fi
-
-log "Setup complete"
-log "Telegram uses outbound polling by default — no public URL required for messaging"
-if [[ -f "${LOG_DIR}/tunnel-url.txt" ]]; then
-  log "Dashboard URL: $(cat "${LOG_DIR}/tunnel-url.txt")"
-fi
+run_bootstrap
