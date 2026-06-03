@@ -1,6 +1,6 @@
 name: hermes-gcp
 runtime: python
-description: Hermes Agent on GCP with Telegram, GitHub MCP, and ingress (Traefik or Cloudflare)
+description: Hermes Agent on GCP with Telegram, GitHub MCP, and Cloudflare tunnel
 
 config:
   gcp:project:
@@ -21,8 +21,6 @@ config:
     type: string
     default: cloudflare-named
   hermes:hostname:
-    type: string
-  hermes:acme_email:
     type: string
   hermes:telegram_webhook:
     type: boolean

@@ -29,16 +29,15 @@ if ingress_mode in ("named", "quick", "disabled"):
         "disabled": "none",
     }[ingress_mode]
 
-valid_ingress = ("cloudflare-named", "cloudflare-quick", "traefik", "none")
+valid_ingress = ("cloudflare-named", "cloudflare-quick", "none")
 if ingress_mode not in valid_ingress:
     raise ValueError(f"hermes:ingress_mode must be one of {valid_ingress}")
 
 telegram_webhook = hermes_config.get_bool("telegram_webhook")
 if telegram_webhook is None:
-    telegram_webhook = ingress_mode in ("cloudflare-named", "traefik")
+    telegram_webhook = ingress_mode == "cloudflare-named"
 
 public_hostname = hermes_config.get("hostname") or cloudflare_config.get("hostname") or ""
-acme_email = hermes_config.get("acme_email") or ""
 
 for api in (
     "compute.googleapis.com",
@@ -61,8 +60,6 @@ secret_names = {
 github_pat = config.get_secret("github_pat")
 if github_pat:
     secret_names["github-pat"] = github_pat
-
-static_ip = None
 
 if ingress_mode == "cloudflare-named":
     account_id = cloudflare_config.require("account_id")
@@ -116,14 +113,6 @@ if ingress_mode == "cloudflare-named":
         tunnel_id=tunnel.id,
     )
     secret_names["cloudflare-tunnel-token"] = tunnel_token.token
-
-elif ingress_mode == "traefik":
-    if not public_hostname:
-        raise ValueError("hermes:hostname is required for traefik ingress")
-    if not acme_email:
-        raise ValueError("hermes:acme_email is required for traefik ingress (Let's Encrypt)")
-
-    static_ip = gcp.compute.Address("hermes-static-ip", region=region)
 
 secrets = {}
 for secret_id, secret_value in secret_names.items():
@@ -181,15 +170,6 @@ gcp.compute.Firewall(
     target_tags=["hermes"],
 )
 
-if ingress_mode == "traefik":
-    gcp.compute.Firewall(
-        "hermes-allow-web",
-        network=network.id,
-        allows=[{"protocol": "tcp", "ports": ["80", "443"]}],
-        source_ranges=["0.0.0.0/0"],
-        target_tags=["hermes"],
-    )
-
 service_account = gcp.serviceaccount.Account(
     "hermes-sa",
     account_id="hermes-agent",
@@ -218,17 +198,12 @@ data_disk = gcp.compute.Disk(
     zone=zone,
 )
 
-network_interface = {"subnetwork": subnet.id}
-if static_ip is not None:
-    network_interface["access_configs"] = [{"nat_ip": static_ip.address}]
-
 startup_script_path = Path(__file__).parent.parent / "vm" / "startup.sh"
 startup_script = startup_script_path.read_text()
 startup_script = startup_script.replace("__PROJECT_ID__", project_id)
 startup_script = startup_script.replace("__MODEL__", model)
 startup_script = startup_script.replace("__INGRESS_MODE__", ingress_mode)
 startup_script = startup_script.replace("__PUBLIC_HOSTNAME__", public_hostname)
-startup_script = startup_script.replace("__ACME_EMAIL__", acme_email)
 startup_script = startup_script.replace(
     "__TELEGRAM_WEBHOOK__", "true" if telegram_webhook else "false"
 )
@@ -252,7 +227,7 @@ instance = gcp.compute.Instance(
             "mode": "READ_WRITE",
         }
     ],
-    network_interfaces=[network_interface],
+    network_interfaces=[{"subnetwork": subnet.id}],
     service_account={
         "email": service_account.email,
         "scopes": ["https://www.googleapis.com/auth/cloud-platform"],
@@ -267,17 +242,6 @@ pulumi.export("vm_name", instance.name)
 pulumi.export("vm_internal_ip", instance.network_interfaces[0].network_ip)
 pulumi.export("ingress_mode", ingress_mode)
 pulumi.export("telegram_webhook", telegram_webhook)
-if static_ip is not None:
-    pulumi.export("static_ip", static_ip.address)
-    pulumi.export(
-        "dns_instructions",
-        pulumi.Output.concat(
-            "Create an A record: ",
-            public_hostname,
-            " -> ",
-            static_ip.address,
-        ),
-    )
 if public_hostname:
     pulumi.export("public_url", f"https://{public_hostname}")
     if telegram_webhook:

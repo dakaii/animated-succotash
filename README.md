@@ -6,22 +6,17 @@ Deploy [Hermes Agent](https://github.com/NousResearch/hermes-agent) to a private
 - **Telegram** — message your agent (polling mode, no public URL needed)
 - **GitHub MCP** — issues, PRs, code search, file edits
 - **Cloudflare named tunnel (default)** — stable `https://bot.yourdomain.com`, no open ports
-- **Traefik ingress** — alternative with static IP + Let's Encrypt
 
 ## Ingress options
 
-| Mode | Public IP | Domain | TLS | Firewall | Cost |
-|---|---|---|---|---|---|
-| **`cloudflare-named`** (default) | No | CNAME on Cloudflare | Cloudflare | No open ports | $0/mo from Cloudflare |
-| **`none`** | No | No | — | SSH via IAP only | $0 extra |
-| **`traefik`** | Static GCP IP | A record → IP | Traefik + Let's Encrypt | 80, 443 open | ~$0/mo (IP free while VM runs) |
-| **`cloudflare-quick`** | No | Random `*.trycloudflare.com` | Cloudflare | No open ports | $0 |
+| Mode | Public IP | Domain | Best for |
+|---|---|---|---|
+| **`cloudflare-named`** (default) | No | CNAME on Cloudflare | Stable HTTPS URL, private VM |
+| **`none`** | No | No | Telegram polling only — simplest |
+| **`cloudflare-quick`** | No | Random `*.trycloudflare.com` | Dev/testing only |
 
-**Recommended:** `cloudflare-named` — VM stays private, DDoS protection included, same ~$10/year domain cost.
-
-### Traefik + static IP (alternative)
-
-Traefik automates TLS and routing if you prefer a traditional VPS setup or can't use Cloudflare. Tradeoff: ports 80/443 are open on a public IP.
+For messaging via Telegram, **`none` + polling** is enough — no domain or tunnel required.
+Use **`cloudflare-named`** when you want a stable dashboard URL or webhooks.
 
 ## Architecture
 
@@ -135,9 +130,8 @@ animated-succotash/
 | `gcp:zone` | `us-central1-a` | VM zone |
 | `hermes:instance_type` | `e2-medium` | VM size (use `e2-micro` for free tier) |
 | `hermes:model` | `deepseek/deepseek-chat` | OpenRouter model |
-| `hermes:ingress_mode` | `cloudflare-named` | `cloudflare-named`, `traefik`, `cloudflare-quick`, `none` |
+| `hermes:ingress_mode` | `cloudflare-named` | `cloudflare-named`, `cloudflare-quick`, `none` |
 | `hermes:hostname` | — | e.g. `bot.yourdomain.com` |
-| `hermes:acme_email` | — | Let's Encrypt contact (traefik mode) |
 
 Secrets (set with `pulumi config set --secret`):
 
