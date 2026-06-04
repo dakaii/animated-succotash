@@ -43,6 +43,7 @@ for api in (
     "secretmanager.googleapis.com",
     "iam.googleapis.com",
     "iap.googleapis.com",
+    "monitoring.googleapis.com",
 ):
     gcp.projects.Service(
         f"enable-{api.replace('.', '-')}",
@@ -190,11 +191,16 @@ gcp.projects.IAMMember(
     member=pulumi.Output.concat("serviceAccount:", service_account.email),
 )
 
+from monitoring import create_weekly_snapshot_policy, setup_monitoring
+
+snapshot_policy = create_weekly_snapshot_policy(region)
+
 data_disk = gcp.compute.Disk(
     "hermes-data",
     type="pd-ssd",
     size=disk_size_gb,
     zone=zone,
+    resource_policies=[snapshot_policy.id],
 )
 
 from vm_bundle import build_startup_script
@@ -235,9 +241,29 @@ instance = gcp.compute.Instance(
     allow_stopping_for_update=True,
 )
 
+alert_email = hermes_config.get("alert_email") or ""
+budget_usd = hermes_config.get_float("budget_usd") or 50.0
+billing_account = gcp_config.get("billing_account") or ""
+
+if billing_account:
+    gcp.projects.Service(
+        "enable-billingbudgets-googleapis-com",
+        service="billingbudgets.googleapis.com",
+        disable_on_destroy=False,
+    )
+
+setup_monitoring(
+    project_id=project_id,
+    public_hostname=public_hostname if ingress_mode != "none" else "",
+    alert_email=alert_email,
+    billing_account=billing_account,
+    budget_usd=budget_usd,
+)
+
 pulumi.export("project_id", project_id)
 pulumi.export("zone", zone)
 pulumi.export("vm_name", instance.name)
+pulumi.export("instance_name", instance.name)
 pulumi.export("vm_internal_ip", instance.network_interfaces[0].network_ip)
 pulumi.export("ingress_mode", ingress_mode)
 pulumi.export("telegram_webhook", telegram_webhook)

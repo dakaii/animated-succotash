@@ -7,7 +7,6 @@ from pathlib import Path
 
 VM_DIR = Path(__file__).parent.parent / "vm"
 BUNDLE_ROOT = "/opt/hermes-bundle"
-# startup.sh is the metadata entrypoint template, not part of the tarball.
 SKIP_IN_BUNDLE = {"startup.sh"}
 
 
@@ -26,8 +25,6 @@ def build_extract_script() -> str:
     return f"""\
 mkdir -p {BUNDLE_ROOT}
 echo '{payload}' | base64 -d | tar -xzf - -C {BUNDLE_ROOT}
-chmod +x {BUNDLE_ROOT}/bootstrap.sh
-find {BUNDLE_ROOT}/lib -name '*.sh' -exec chmod +x {{}} \\;
 """
 
 

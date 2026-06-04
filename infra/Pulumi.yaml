@@ -24,6 +24,13 @@ config:
     type: string
   hermes:telegram_webhook:
     type: boolean
+  hermes:alert_email:
+    type: string
+  hermes:budget_usd:
+    type: number
+    default: 50
+  gcp:billing_account:
+    type: string
   hermes:tunnel_mode:
     type: string
   cloudflare:account_id:

@@ -59,8 +59,9 @@ Cloudflare Tunnel itself is **$0/month**. You only pay for the domain registrati
 ### 1. Configure secrets
 
 ```bash
-chmod +x scripts/*.sh
-./scripts/setup.sh
+chmod +x scripts/hermes scripts/*.sh
+python -m hermes_gcp setup
+# or: ./scripts/setup.sh
 ```
 
 This stores secrets in Pulumi config and provisions them in GCP Secret Manager on deploy.
@@ -69,7 +70,8 @@ This stores secrets in Pulumi config and provisions them in GCP Secret Manager o
 
 ```bash
 export CLOUDFLARE_API_TOKEN=your-token   # required for named tunnel
-./scripts/deploy.sh
+python -m hermes_gcp deploy
+# or: ./scripts/deploy.sh
 ```
 
 First boot takes ~3–5 minutes (Docker pull + Hermes start).
@@ -81,7 +83,7 @@ Open Telegram, find your bot, send a message. Hermes replies via the gateway run
 ### 4. Your stable URL
 
 ```bash
-./scripts/get-tunnel-url.sh
+python -m hermes_gcp tunnel-url
 # e.g. https://bot.yourdomain.com
 ```
 
@@ -97,6 +99,33 @@ cp hermes/config.yaml.example hermes/config.yaml
 # Replace GITHUB_PERSONAL_ACCESS_TOKEN in config.yaml
 
 ./scripts/local-dev.sh
+# or: python -m hermes_gcp local-dev
+```
+
+## Monitoring and backups
+
+GCP monitoring is provisioned by Pulumi (cheap, no third-party SaaS):
+
+| Resource | Purpose |
+|---|---|
+| **Uptime check** | HTTPS probe on your public hostname (named/quick tunnel) |
+| **Email alert** | Fires when uptime check fails for 5 minutes |
+| **Weekly disk snapshots** | Sunday 04:00 UTC, 14-day retention on the data disk |
+| **Budget alert** | Optional monthly spend threshold (requires billing account ID) |
+
+Set during setup or manually:
+
+```bash
+pulumi config set hermes:alert_email you@example.com
+pulumi config set hermes:budget_usd 50
+pulumi config set gcp:billing_account billingAccounts/XXXX-XXXX-XXXX-XXXX
+pulumi up
+```
+
+Check stack health:
+
+```bash
+python -m hermes_gcp health
 ```
 
 ## Project layout
@@ -105,27 +134,30 @@ cp hermes/config.yaml.example hermes/config.yaml
 animated-succotash/
 ├── infra/                  # Pulumi GCP + Cloudflare infrastructure
 │   ├── __main__.py
+│   ├── monitoring.py       # Uptime checks, alerts, snapshots, budget
 │   ├── vm_bundle.py        # Packages vm/ files into startup metadata
 │   └── requirements.txt
 ├── vm/
-│   ├── startup.sh          # Thin entrypoint (env vars → bootstrap)
-│   ├── bootstrap.sh        # Orchestrates first-boot setup
+│   ├── startup.sh          # Thin entrypoint → Python bootstrap
+│   ├── bootstrap/          # VM first-boot (stdlib Python)
 │   ├── docker-compose.yml  # Hermes container definition
 │   ├── hermes.config.yaml.tpl
 │   ├── hermes.github-mcp.yaml.tpl
-│   ├── systemd/            # cloudflared unit files
-│   └── lib/                # Modular bootstrap functions
+│   └── systemd/            # cloudflared unit files
+├── hermes_gcp/             # Local operator CLI (stdlib Python)
+│   └── commands/           # setup, deploy, health, rebootstrap, …
 ├── hermes/                 # Local dev only
-│   ├── docker-compose.yml  # Local dev compose file
+│   ├── docker-compose.yml
 │   ├── config.yaml.example
 │   └── .env.example
 └── scripts/
-    ├── setup.sh            # Interactive Pulumi config
-    ├── deploy.sh           # pulumi up wrapper
-    ├── local-dev.sh        # Run Hermes locally
-    ├── health.sh           # Check VM + gateway status
-    ├── get-tunnel-url.sh   # Fetch dashboard URL from VM
-    └── rebootstrap.sh      # Re-run bootstrap after secret changes
+    ├── hermes              # Dispatches to python -m hermes_gcp
+    ├── setup.sh            # Thin wrapper
+    ├── deploy.sh
+    ├── local-dev.sh
+    ├── health.sh
+    ├── get-tunnel-url.sh
+    └── rebootstrap.sh
 ```
 
 ## Configuration
@@ -138,6 +170,9 @@ animated-succotash/
 | `hermes:model` | `deepseek/deepseek-chat` | OpenRouter model |
 | `hermes:ingress_mode` | `cloudflare-named` | `cloudflare-named`, `cloudflare-quick`, `none` |
 | `hermes:hostname` | — | e.g. `bot.yourdomain.com` |
+| `hermes:alert_email` | — | Email for uptime/budget alerts |
+| `hermes:budget_usd` | `50` | Monthly GCP budget threshold |
+| `gcp:billing_account` | — | e.g. `billingAccounts/XXXX-…` for budget alerts |
 
 Secrets (set with `pulumi config set --secret`):
 
@@ -192,7 +227,7 @@ gcloud compute ssh hermes-vm --zone=us-central1-a --tunnel-through-iap \
 **Re-run bootstrap after secret rotation**
 
 ```bash
-./scripts/rebootstrap.sh
+python -m hermes_gcp rebootstrap
 ```
 
 ## Telegram: polling vs webhook (not WebSocket)
